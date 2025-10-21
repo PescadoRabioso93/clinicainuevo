@@ -1,0 +1,150 @@
+codex                                                                                                                                                                                    
+Resumen Del Plan                                                                                                                                                                         
+                                                                                                                                                                                         
+- Objetivo: dejar el repo listo para desarrollar/features con pruebas, evitar dependencias del proyecto de referencia y asegurar calidad operativa (métricas, PWA, seguridad).           
+- Enfoque: consolidar paquetes locales, estabilizar imports/boot, completar APIs/DB usadas por tests, robustecer ICS y observabilidad, y cerrar QA/CI.                                   
+                                                                                                                                                                                         
+Orden Propuesto (Fases)                                                                                                                                                                  
+                                                                                                                                                                                         
+- Fase 1: Estructura y imports (eliminar dependencias frágiles).                                                                                                                         
+- Fase 2: Boot estable + DB + semillas mínimas.                                                                                                                                          
+- Fase 3: ICS sólido (ETag, 304, 429, tokens, métricas).                                                                                                                                 
+- Fase 4: API core (paginación, RBAC, ETag, HEAD).                                                                                                                                       
+- Fase 5: UI SSR (flows CRUD, admin/settings).                                                                                                                                           
+- Fase 6: Observabilidad y seguridad.                                                                                                                                                    
+- Fase 7: PWA (SW y manifest).                                                                                                                                                           
+- Fase 8: Testing y QA verde.                                                                                                                                                            
+- Fase 9: CI/CD y documentación.                                                                                                                                                         
+                                                                                                                                                                                         
+Fase 1 — Estructura e Imports                                                                                                                                                            
+                                                                                                                                                                                         
+- Consolidación paquetes:                                                                                                                                                                
+    - Archivos: aiclinic_metrics.py → aiclinic/metrics.py.                                                                                                                               
+    - Acción: mover el contenido (y helpers como _counter/_gauge/_hist) a aiclinic/metrics.py; exportar ICS_200, ICS_304, login_failures_counter, clinicai_appointments_crud_total,      
+request_duration_hist, audit_events_counter.                                                                                                                                             
+    - Aceptación: from aiclinic.metrics import ICS_200, ICS_304 funciona sin sitecustomize.py. Comando: python - <<<'import aiclinic.metrics as m; print(m.ICS_200._name)'.              
+- Depuración de shims:                                                                                                                                                                   
+    - Archivos: sitecustomize.py, conftest.py (si re-inyectan rutas/paths).                                                                                                              
+    - Acción: mantener sitecustomize.py solo como fallback temporal; plan para retirarlo luego de migrar imports.                                                                        
+    - Aceptación: tests y el servidor levantan sin depender de alias de AIClinic.*.                                                                                                      
+- Referencia “AIClinic/”:                                                                                                                                                                
+    - Archivos: AIClinic/** (proyecto de referencia).                                                                                                                                    
+    - Acción: evitar imports en tiempo de ejecución; documentar que es referencia únicamente. Si hay tests que lo usan, proveer alias limpio en tests/bootstrap_pytest.py hasta          
+migrarlos.                                                                                                                                                                               
+    - Aceptación: búsquedas de from AIClinic... en código productivo dan cero resultados.                                                                                                
+                                                                                                                                                                                         
+Fase 2 — Boot Estable + DB + Semillas                                                                                                                                                    
+                                                                                                                                                                                         
+- Entrypoint único:                                                                                                                                                                      
+    - Archivos: app.py.                                                                                                                                                                  
+    - Acción: asegurar que HOST=0.0.0.0 PORT=8000 python app.py levanta /health, /metrics, /openapi.json.                                                                                
+    - Aceptación: curl /health → 200 con version, env; curl /metrics contiene clinicai_up o counters propios; curl /openapi.json con ETag.                                               
+- DB y modelos:                                                                                                                                                                          
+    - Archivos: aiclinic_db/models/**, aiclinic_db/db.py, aiclinic_db/ensure_schema.py.                                                                                                  
+    - Acción: validar que existen entidades usadas por API/UI (Appointment, Patient, ProviderProfile, Invoice, Payment, Service, User, UserPref, Encounter, Diagnosis, Medication,       
+AuditLog). Confirmar ensure_provider_profiles_ics_token() activo (ya está).                                                                                                              
+    - Aceptación: from aiclinic_db.models import Appointment, ProviderProfile sin error; ensure_schema agrega ics_token en SQLite.                                                       
+- Semillas mínimas:                                                                                                                                                                      
+    - Archivos: scripts/demo_seed.py (o crear si falta).                                                                                                                                 
+    - Acción: crear seed reproducible (pacientes, proveedores, 10 turnos próximos 90 días, un admin, settings por defecto).                                                              
+    - Aceptación: levantar app, /ui con login funciona (credenciales demo), /ics/provider/1.ics devuelve 200 con eventos.                                                                
+                                                                                                                                                                                         
+Fase 3 — ICS Sólido                                                                                                                                                                      
+                                                                                                                                                                                         
+- Endpoints ICS:                                                                                                                                                                         
+    - Archivos: aiclinic_ics/feeds.py.                                                                                                                                                   
+    - Acción: mantener ETag estable, lógica de 200→304, y contar métricas ICS_200/ICS_304; añadir chequeo de token por proveedor (ya implementado) y tolerar HEAD.                       
+    - Aceptación: 1er GET 200 + ETag; 2do GET con If-None-Match → 304; /metrics incluye clinicai_ics_200_total y clinicai_ics_304_total.                                                 
+- Rate limiting:                                                                                                                                                                         
+    - Archivos: app.py (limiter global) y/o wrapper en feeds.py.                                                                                                                         
+    - Acción: aplicar límite p.e. 10/min a GET /ics/provider/<id>.ics, devolver 429 + Retry-After.                                                                                       
+    - Aceptación: stress local provoca 429 y métrica opcional clinicai_ics_ratelimited_total.                                                                                            
+- HEAD y Cache-Control:                                                                                                                                                                  
+    - Acción: asegurar que HEAD no genera body; Cache-Control: no-cache.                                                                                                                 
+    - Aceptación: curl -I /ics/provider/1.ics retorna ETag y no body.                                                                                                                    
+                                                                                                                                                                                         
+Fase 4 — API Core                                                                                                                                                                        
+                                                                                                                                                                                         
+- Pacientes, Turnos, Encuentros:                                                                                                                                                         
+    - Archivos: aiclinic_api/patients.py, aiclinic_api/appointments.py, aiclinic_api/encounters.py.                                                                                      
+    - Acción: revisar contratos (GET/POST/PUT/DELETE), validación Pydantic, RBAC con @auth_required/@roles_required, paginación con X-Total-Count + Link.                                
+    - Aceptación: GET /api/appointments?limit=...&offset=... con headers de paginación; bloquear rol no autorizado con 403.                                                              
+- ETags y HEAD:                                                                                                                                                                          
+    - Acción: para lecturas idempotentes, incluir ETag y soportar If-None-Match.                                                                                                         
+    - Aceptación: GET /api/patients/<id> con ETag; repetir con If-None-Match → 304.                                                                                                      
+- Asistente (stub → listo v1):                                                                                                                                                           
+    - Archivos: aiclinic_api/assistant.py, services/ai_client.py.                                                                                                                        
+    - Acción: mantener stub actual (es-AR + citations no vacías) y auditar assistant_answer. Documentar cambios para futura integración LLM (streaming, retrieval).                      
+    - Aceptación: POST /api/assistant con question devuelve answer + citations.                                                                                                          
+                                                                                                                                                                                         
+Fase 5 — UI SSR                                                                                                                                                                          
+                                                                                                                                                                                         
+- Login/Logout + bloqueo:                                                                                                                                                                
+    - Archivos: aiclinic_ui/ui.py, templates bajo templates/ui/**.                                                                                                                       
+    - Acción: revisar rutas: login con rate limit por IP/email y lockout, logout, settings (tema/idioma), admin users, providers, billing list.                                          
+    - Aceptación: flujos SSR funcionan con CSRF, feedback flash y RBAC por rol.                                                                                                          
+- CRUD UI:                                                                                                                                                                               
+    - Acción: completar vistas CRUD probadas en tests (appointments, patients, billing, board).                                                                                          
+    - Aceptación: tests SSR pasan; cambios reflejan métricas/auditoría.                                                                                                                  
+                                                                                                                                                                                         
+Fase 6 — Observabilidad y Seguridad                                                                                                                                                      
+                                                                                                                                                                                         
+- Métricas:                                                                                                                                                                              
+    - Archivos: aiclinic/metrics.py, app.py, aiclinic_ui/ui.py, aiclinic_api/**.                                                                                                         
+    - Acción: usar request_duration_hist, audit_events_counter, login_failures_counter, clinicai_appointments_crud_total en puntos críticos (auth, CRUD, ICS).                           
+    - Aceptación: /metrics expone histogram y counters; dashboard Prometheus/Grafana puede consultarlos.                                                                                 
+- Headers y CSP:                                                                                                                                                                         
+    - Archivos: app.py, templates base.                                                                                                                                                  
+    - Acción: CSP con nonce o hash en prod; X-Content-Type-Options, X-Frame-Options, Referrer-Policy (ya se setean), HSTS en prod.                                                       
+    - Aceptación: curl a rutas refleja headers; sin bloqueos en UI.                                                                                                                      
+                                                                                                                                                                                         
+Fase 7 — PWA                                                                                                                                                                             
+                                                                                                                                                                                         
+- Service Worker:                                                                                                                                                                        
+    - Archivos: static/sw.js (canónico), /sw.js (mirror), templates base.                                                                                                                
+    - Acción: mantener registro con scope /static/ y mirror /sw.js para global scope; en dev desregistrar (ya contemplado en base).                                                      
+    - Aceptación: en prod, SW se registra; en dev se evita y limpia caches.                                                                                                              
+- Manifest e iconos:                                                                                                                                                                     
+    - Archivos: static/manifest.json, static/icons/*.                                                                                                                                    
+    - Acción: completar iconos faltantes (static/icons no existe); verificar start_url, display, background_color.                                                                       
+    - Aceptación: Lighthouse PWA básico OK; link rel="manifest" presente (ya está).                                                                                                      
+                                                                                                                                                                                         
+Fase 8 — Testing y QA                                                                                                                                                                    
+                                                                                                                                                                                         
+- Unit/integ:                                                                                                                                                                            
+    - Archivos: tests/**, conftest.py.                                                                                                                                                   
+    - Acción: fixtures centralizados de usuarios por rol (admin/clinician/receptionist/viewer), DB session/cleanup por test, helpers para login SSR y tokens API.                        
+    - Aceptación: pytest -q en verde local; cobertura básica sobre APIs/ICS/UI.                                                                                                          
+- Smokes operativos:                                                                                                                                                                     
+    - Archivos: scripts/smoke_release.(sh|ps1).                                                                                                                                          
+    - Acción: validar /health, /metrics, /ics/provider/1.ics 200→304 y métrica presente.                                                                                                 
+    - Aceptación: scripts devuelven “All smokes passed”.                                                                                                                                 
+                                                                                                                                                                                         
+Fase 9 — CI/CD y Docs                                                                                                                                                                    
+                                                                                                                                                                                         
+- CI:                                                                                                                                                                                    
+    - Archivos: .github/workflows/*.                                                                                                                                                     
+    - Acción: pipeline que corre make qa (ruff + black --check + pytest -q), publica cobertura y logs/artefactos de fallos.                                                              
+    - Aceptación: PRs bloquean si QA falla; artifacts adjuntos en fallos.                                                                                                                
+- Docs:                                                                                                                                                                                  
+    - Archivos: README.md, ROADMAP.md, API.md, OPERATIONS.md, runbooks/*.                                                                                                                
+    - Acción: actualizar comandos reales, estructura final de paquetes, guía de release (tags, GHCR si aplica), smoke tests y SLOs/SLIs.                                                 
+    - Aceptación: desarrollador nuevo puede levantar el proyecto y correr QA sólo con README.                                                                                            
+                                                                                                                                                                                         
+Verificaciones Rápidas (Checklist Operativo)                                                                                                                                             
+                                                                                                                                                                                         
+- Servidor:                                                                                                                                                                              
+    - HOST=0.0.0.0 PORT=8000 python app.py → /health 200, /metrics OK.                                                                                                                   
+- ICS:                                                                                                                                                                                   
+    - curl -i /ics/provider/1.ics → 200 + ETag.                                                                                                                                          
+    - curl -i -H "If-None-Match: <etag>" /ics/provider/1.ics → 304.                                                                                                                      
+    - /metrics contiene clinicai_ics_200_total y clinicai_ics_304_total.                                                                                                                 
+- API:                                                                                                                                                                                   
+    - GET /api/appointments?limit=5&offset=0 → X-Total-Count + Link.                                                                                                                     
+    - RBAC: usuario sin rol adecuado → 403.                                                                                                                                              
+- UI:                                                                                                                                                                                    
+    - Login con credenciales demo; bloqueo por intentos; cambio de tema persistente.                                                                                                     
+- PWA:                                                                                                                                                                                   
+    - link rel="manifest" presente; SW registrado solo fuera de dev; iconos existen.                                                                                                     
+- QA:                                                                                                                                                                                    
+    - ruff check . && black . --check --fast && pytest -q en verde.             
